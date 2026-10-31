@@ -1,0 +1,1 @@
+call npx serve -s dist
