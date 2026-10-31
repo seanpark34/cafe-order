@@ -5,6 +5,13 @@ import flet as ft
 from cafe_status import AppState
 
 
+def _format_receipt_item(item: dict) -> str:
+    name = item["name"]
+    if item.get("temperature"):
+        name = f"{name} {item['temperature']}"
+    return f"{name} x{item['count']}  {item['price']}"
+
+
 @ft.component
 def Pay(state: AppState):
     payment_started, set_payment_started = ft.use_state(False)
@@ -170,9 +177,7 @@ def Pay(state: AppState):
                                 ft.Text("SIHUN34 CAFE", weight=ft.FontWeight.BOLD),
                                 ft.Text("------------------------", size=12),
                                 *[
-                                    ft.Text(
-                                        f"{item['name']} x{item['count']}  {item['price']}"
-                                    )
+                                    ft.Text(_format_receipt_item(item))
                                     for item in receipt_items
                                 ],
                                 ft.Text("------------------------", size=12),
