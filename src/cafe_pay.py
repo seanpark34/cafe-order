@@ -2,14 +2,35 @@ import asyncio
 
 import flet as ft
 
-from cafe_status import AppState
+from cafe_status import (
+    AppState,
+    PRODUCT_STAR_REWARDS,
+    STAR_REWARD_COSTS,
+    calculate_redemption,
+    cart_item_key,
+)
 
 
 def _format_receipt_item(item: dict) -> str:
     name = item["name"]
     if item.get("temperature"):
         name = f"{name} {item['temperature']}"
-    return f"{name} x{item['count']}  {item['price']}"
+    count = int(item["count"])
+    redeemed_count = item.get("redeemed_count", 0)
+    lines = []
+    if redeemed_count:
+        lines.append(f"{name} x{redeemed_count}  STAR REDEEM")
+    paid_count = count - redeemed_count
+    if paid_count:
+        lines.append(f"{name} x{paid_count}  {item['price']}")
+    return "\n".join(lines)
+
+
+def _count_paid_items(cart: list[dict], redemptions: dict[str, int]) -> int:
+    return sum(
+        int(item["count"]) - redemptions.get(cart_item_key(item), 0)
+        for item in cart
+    )
 
 
 @ft.component
@@ -23,25 +44,101 @@ def Pay(state: AppState):
     receipt_moving, set_receipt_moving = ft.use_state(False)
     receipt_items, set_receipt_items = ft.use_state([])
     receipt_total, set_receipt_total = ft.use_state(0)
-    total = sum(
+    redemptions, set_redemptions = ft.use_state({})
+    stars_spent, amount_discounted = calculate_redemption(
+        state.cart, redemptions
+    )
+    subtotal = sum(
         int(item["price"].replace("₩", "").replace(",", ""))
         * int(item["count"])
         for item in state.cart
     )
-    receipt_height = 160 + 32 * len(receipt_items)
+    total = subtotal - amount_discounted
+
+    def update_redemption(key: str, change: int) -> None:
+        updated = dict(redemptions)
+        updated[key] = updated.get(key, 0) + change
+        if updated[key] == 0:
+            del updated[key]
+        set_redemptions(updated)
+
+    redemption_controls = []
+    if state.is_logged_in:
+        for item in state.cart:
+            reward_key = PRODUCT_STAR_REWARDS.get(item["name"])
+            if reward_key is None:
+                continue
+            item_key = cart_item_key(item)
+            selected_count = redemptions.get(item_key, 0)
+            item_quantity = int(item["count"])
+            stars_remaining = state.stars - stars_spent
+            star_cost = STAR_REWARD_COSTS[reward_key]
+            redemption_controls.append(
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    controls=[
+                        ft.Text(f"{item['name']} · 별 {star_cost}개"),
+                        ft.IconButton(
+                            ft.Icons.REMOVE,
+                            on_click=lambda _, key=item_key: update_redemption(
+                                key, -1
+                            ),
+                            disabled=selected_count == 0,
+                        ),
+                        ft.Text(f"{selected_count}/{item_quantity}"),
+                        ft.IconButton(
+                            ft.Icons.ADD,
+                            on_click=lambda _, key=item_key: update_redemption(
+                                key, 1
+                            ),
+                            disabled=(
+                                selected_count >= item_quantity
+                                or stars_remaining < star_cost
+                            ),
+                        ),
+                    ],
+                )
+            )
+    receipt_line_count = sum(
+        len(_format_receipt_item(item).splitlines()) for item in receipt_items
+    )
+    receipt_height = 160 + 32 * receipt_line_count
     receipt_stack_height = max(400, 100 + receipt_height)
 
-    async def start_payment(_):
-        set_receipt_items([dict(item) for item in state.cart])
+    async def start_payment(e):
+        stars_earned = _count_paid_items(state.cart, redemptions)
+        receipt_snapshot = []
+        for item in state.cart:
+            receipt_item = dict(item)
+            receipt_item["redeemed_count"] = redemptions.get(
+                cart_item_key(item), 0
+            )
+            receipt_snapshot.append(receipt_item)
+        set_receipt_items(receipt_snapshot)
         set_receipt_total(total)
         set_payment_started(True)
-        await asyncio.sleep(0.1)
-        set_card_at_reader(True)
-        await asyncio.sleep(1.5)
-        set_card_tapped(True)
-        for step in range(6):
-            await asyncio.sleep(0.4)
-            set_loading_dots(step % 3 + 1)
+        if total > 0:
+            await asyncio.sleep(0.1)
+            set_card_at_reader(True)
+            await asyncio.sleep(1.5)
+            set_card_tapped(True)
+            for step in range(6):
+                await asyncio.sleep(0.4)
+                set_loading_dots(step % 3 + 1)
+        if state.is_logged_in:
+            try:
+                state.complete_purchase(
+                    stars_spent,
+                    stars_earned=stars_earned,
+                )
+            except (OSError, ValueError):
+                set_payment_started(False)
+                e.page.show_dialog(
+                    ft.SnackBar(
+                        ft.Text("별 처리에 실패해 주문을 완료하지 못했습니다.")
+                    )
+                )
+                return
         set_payment_complete(True)
         await asyncio.sleep(1)
         set_payment_started(False)
@@ -54,6 +151,7 @@ def Pay(state: AppState):
         state.cart_count = 0
 
     return ft.Column(
+        expand=True,
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         controls=[
             ft.Text(
@@ -61,11 +159,36 @@ def Pay(state: AppState):
                 size=28,
                 visible=not payment_started and not payment_complete,
             ),
+            ft.Text(
+                f"별 {stars_spent}개 사용 · {amount_discounted:,}원 할인",
+                visible=(
+                    not payment_started
+                    and not payment_complete
+                    and stars_spent > 0
+                ),
+            ),
+            ft.Column(
+                spacing=0,
+                controls=redemption_controls,
+                visible=not payment_started and not payment_complete,
+            ),
+            ft.Text(
+                "로그인하면 보유 별을 사용할 수 있어요.",
+                visible=(
+                    not state.is_logged_in
+                    and not payment_started
+                    and not payment_complete
+                ),
+            ),
             ft.Button(
-                "Pay",
+                "별로 주문하기" if total == 0 and stars_spent > 0 else "Pay",
                 on_click=start_payment,
-                disabled=payment_started or total == 0,
-                visible=not payment_started and not payment_complete and total > 0,
+                disabled=payment_started or (total == 0 and stars_spent == 0),
+                visible=(
+                    not payment_started
+                    and not payment_complete
+                    and (total > 0 or stars_spent > 0)
+                ),
             ),
             ft.Stack(
                 width=300,
@@ -177,8 +300,9 @@ def Pay(state: AppState):
                                 ft.Text("SIHUN34 CAFE", weight=ft.FontWeight.BOLD),
                                 ft.Text("------------------------", size=12),
                                 *[
-                                    ft.Text(_format_receipt_item(item))
+                                    ft.Text(line)
                                     for item in receipt_items
+                                    for line in _format_receipt_item(item).splitlines()
                                 ],
                                 ft.Text("------------------------", size=12),
                                 ft.Text(

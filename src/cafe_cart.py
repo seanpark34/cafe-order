@@ -1,5 +1,5 @@
 import flet as ft
-from cafe_status import AppState
+from cafe_status import AppState, CAFE_COLOR
 
 
 @ft.component
@@ -51,7 +51,7 @@ def Cart(state: AppState):
                     alignment=ft.MainAxisAlignment.CENTER,
                     expand=1
                 ),
-                bgcolor="#FFAE00",
+                bgcolor=CAFE_COLOR,
                 height=100
             ),
             ft.Row(
